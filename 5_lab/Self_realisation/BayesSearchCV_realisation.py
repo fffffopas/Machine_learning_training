@@ -2,14 +2,15 @@ from sklearn.base import BaseEstimator, MetaEstimatorMixin, clone
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_absolute_error, mean_squared_error, root_mean_squared_error, r2_score
 from sklearn.model_selection import KFold
-from GaussianProcess_realisation import GaussianProcess
+from .GaussianProcess_realisation import GaussianProcess
+from joblib import delayed, Parallel
 
 import scipy.stats
 import numpy as np
 import sklearn
 
 class BayesSearchCV(BaseEstimator, MetaEstimatorMixin):
-    def __init__(self, estimator: BaseEstimator, params_space: dict, cv: int=5, scoring: str="r2", random_state: int=101, n_iter: int=10, start_iter: int=5):
+    def __init__(self, estimator: BaseEstimator, params_space: dict, cv: int=5, scoring: str="r2", random_state: int=101, n_iter: int=10, start_iter: int=5, n_jobs: int=1):
         
         self.estimator = estimator
         self.scoring = scoring
@@ -18,8 +19,27 @@ class BayesSearchCV(BaseEstimator, MetaEstimatorMixin):
         self.random_state = random_state
         self.n_iter = n_iter
         self.start_iter = start_iter
+        self.n_jobs = n_jobs
 
     def preprocess(self, X: np.ndarray, y: np.ndarray):
+
+        def k_train(kf, X: np.ndarray, y :np.ndarray, estimator: BaseEstimator, value: dict, metric, sign: int):
+            list_metrics = []
+            for index_train, index_val in kf.split(X):
+                X_train, X_val = X[index_train], X[index_val]
+                y_train, y_val = y[index_train], y[index_val]
+
+                model = clone(estimator)
+                model.set_params(**value)
+                model.fit(X_train, y_train)
+
+                y_pred = model.predict(X_val)
+                metric_k = sign * metric(y_val, y_pred)
+
+                list_metrics.append(metric_k)
+
+            mean_metric_k = sum(list_metrics)/len(list_metrics)
+            return mean_metric_k, value
 
         kf = KFold(n_splits=self.cv, shuffle=True, random_state=self.random_state)
         self.list_param = list()
@@ -28,9 +48,9 @@ class BayesSearchCV(BaseEstimator, MetaEstimatorMixin):
         self.best_params_ = None
         self.int_params = ['n_estimators', 'max_depth', 'min_samples_split', 'max_leaves']
 
+        grid = []
         for i in range(self.start_iter):
             value = dict()
-            list_metric_temp = list()
 
             for key, dist in self.params_space.items():
                 if hasattr(dist, "rvs"):
@@ -42,20 +62,13 @@ class BayesSearchCV(BaseEstimator, MetaEstimatorMixin):
                 if key in self.int_params:
                     value[key] = int(np.round(value[key]))
 
-            for index_train, index_val in kf.split(X):
-                X_train, X_val = X[index_train], X[index_val]
-                y_train, y_val = y[index_train], y[index_val]
+            grid.append(value)
 
-                model = clone(self.estimator)
-                model.set_params(**value)
-                model.fit(X_train, y_train)
+            
+        list_metrics_params = Parallel(n_jobs=self.n_jobs)(delayed(k_train)(kf, X, y, self.estimator, value, self.metric, self.sign) 
+                                                           for value in grid)
 
-                y_pred = model.predict(X_val)
-                metric_k = self.sign * self.metric(y_val, y_pred)
-
-                list_metric_temp.append(metric_k)
-
-            mean_metric_k = sum(list_metric_temp)/len(list_metric_temp)
+        for mean_metric_k, value in list_metrics_params:
             if mean_metric_k > self.best_score_:
                 self.best_score_ = mean_metric_k
                 self.best_params_ = value
@@ -96,6 +109,19 @@ class BayesSearchCV(BaseEstimator, MetaEstimatorMixin):
         self.sign = dict_sign[self.scoring]
         self.preprocess(X, y)
 
+        def fit_k(estimator: BaseEstimator, index_train: np.ndarray, index_val: np.ndarray, X: np.ndarray, y: np.ndarray, value: dict):
+            X_train, X_val = X[index_train], X[index_val]
+            y_train, y_val = y[index_train], y[index_val]
+
+            model = clone(estimator)
+            model.set_params(**value)
+            model.fit(X_train, y_train)
+
+            y_pred = model.predict(X_val)
+            metric_k = self.sign * self.metric(y_val, y_pred)
+
+            return metric_k
+
         kf = KFold(n_splits=self.cv, shuffle=True, random_state=self.random_state)
         for i in range(self.n_iter):
             surr_model = GaussianProcess()
@@ -129,20 +155,10 @@ class BayesSearchCV(BaseEstimator, MetaEstimatorMixin):
 
             best_param = P_test[np.argmax(ei)]
             value = dict(zip(self.params_space.keys(), list(best_param)))
-            list_metrics = []
-            for index_train, index_val in kf.split(X):
-                X_train, X_val = X[index_train], X[index_val]
-                y_train, y_val = y[index_train], y[index_val]
 
-                model = clone(self.estimator)
-                model.set_params(**value)
-                model.fit(X_train, y_train)
-
-                y_pred = model.predict(X_val)
-                metric_k = self.sign * self.metric(y_val, y_pred)
-
-                list_metrics.append(metric_k)
-
+            list_metrics = Parallel(n_jobs=self.n_jobs)(delayed(fit_k)(self.estimator, index_train, index_val, X, y, value)
+                                                        for index_train, index_val in kf.split(X))
+            
             mean_metric_k = sum(list_metrics)/len(list_metrics)
             if mean_metric_k > self.best_score_:
                 self.best_score_ = mean_metric_k

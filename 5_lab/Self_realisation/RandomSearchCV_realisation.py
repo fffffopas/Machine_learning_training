@@ -2,12 +2,13 @@ from sklearn.metrics import mean_absolute_error, mean_squared_error, root_mean_s
 from sklearn.base import BaseEstimator, MetaEstimatorMixin, clone
 import scipy.stats
 from sklearn.model_selection import KFold
+from joblib import delayed, Parallel
 
 import numpy as np
 import sklearn
 
 class RandomSearchCV(BaseEstimator, MetaEstimatorMixin):
-    def __init__(self, estimator: BaseEstimator, params_space: dict, cv: int=5, scoring: str="r2", random_state: int=101, n_iter: int=10):
+    def __init__(self, estimator: BaseEstimator, params_space: dict, cv: int=5, scoring: str="r2", random_state: int=101, n_iter: int=10, n_jobs: int=1):
 
         self.estimator = estimator
         self.scoring = scoring
@@ -15,6 +16,7 @@ class RandomSearchCV(BaseEstimator, MetaEstimatorMixin):
         self.params_space = params_space
         self.random_state = random_state
         self.n_iter = n_iter
+        self.n_jobs = n_jobs
 
     def fit(self, X: np.ndarray, y: np.ndarray):
         X = X.to_numpy() if hasattr(X, "to_numpy") else np.array(X)
@@ -39,7 +41,7 @@ class RandomSearchCV(BaseEstimator, MetaEstimatorMixin):
         sign = dict_sign[self.scoring]
 
         kf = KFold(n_splits=self.cv, shuffle=True, random_state=self.random_state)
-
+        grid = []
         for iter in range(self.n_iter):
             value = dict()
             for key, dist in self.params_space.items():
@@ -49,12 +51,15 @@ class RandomSearchCV(BaseEstimator, MetaEstimatorMixin):
                     np.random.seed(self.random_state + iter)
                     value[key] = np.random.choice(dist)
 
+            grid.append(value)
+
+        def k_train(kf, X, y, estimator, value, metric, sign):
             list_metrics = []
             for index_train, index_val in kf.split(X):
                 X_train, X_val = X[index_train], X[index_val]
                 y_train, y_val = y[index_train], y[index_val]
 
-                model = clone(self.estimator)
+                model = clone(estimator)
                 model.set_params(**value)
                 model.fit(X_train, y_train)
 
@@ -64,6 +69,12 @@ class RandomSearchCV(BaseEstimator, MetaEstimatorMixin):
                 list_metrics.append(metric_k)
 
             mean_metric_k = sum(list_metrics)/len(list_metrics)
+            return mean_metric_k, value
+        
+        list_metrics_params = Parallel(n_jobs=self.n_jobs)(delayed(k_train)(kf, X, y, self.estimator, value, metric, sign) 
+                                                           for value in grid)
+        
+        for mean_metric_k, value in list_metrics_params:
             if mean_metric_k > self.best_score_:
                 self.best_score_ = mean_metric_k
                 self.best_params_ = value
