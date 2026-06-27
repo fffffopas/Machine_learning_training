@@ -178,9 +178,3 @@ class BayesSearchCV(BaseEstimator, MetaEstimatorMixin):
     def predict(self, X: np.ndarray):
         sklearn.utils.validation.check_is_fitted(self, ["best_estimator_"])
         return self.best_estimator_.predict(X)
-
-
-            
-
-
-
